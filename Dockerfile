@@ -1,17 +1,23 @@
-FROM mcr.microsoft.com/playwright/python:latest
+FROM python:3.12-slim
 
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+RUN pip install virtualenv
+
+RUN virtualenv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN playwright install
+
+RUN playwright install chromium
+RUN playwright install-deps chromium
 
 COPY . .
 
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-

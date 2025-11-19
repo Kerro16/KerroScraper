@@ -3,8 +3,7 @@ from urllib.parse import quote, urljoin
 import re
 
 class CuracaoScraper:
-    BASE = "https://www.lacuracaonline.com/elsalvador"
-    SEARCH_URL = BASE + "/search/"
+    BASE = "https://www.lacuracaonline.com"
     PRICE_RE = re.compile(r"\$\s?\d[\d,\.]*")
 
     def __init__(self, headless: bool = True, max_items: int = 20):
@@ -13,42 +12,137 @@ class CuracaoScraper:
 
     def scrape(self, query: str) -> list:
         results = []
-        search_url = f"{self.SEARCH_URL}{quote(query)}"
+        seen_urls = set()  # Para evitar duplicados
+        search_url = f"{self.BASE}/elsalvador/{quote(query)}"
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=self.headless)
+            browser = p.chromium.launch(
+                headless=self.headless,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--no-sandbox'
+                ]
+            )
             try:
-                page = browser.new_page()
-                page.set_extra_http_headers({"Accept-Language": "es-ES"})
+                context = browser.new_context(
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    locale='es-ES',
+                    extra_http_headers={'Accept-Language': 'es-ES,es;q=0.9'}
+                )
+
+                page = context.new_page()
+                page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                """)
+
                 try:
-                    page.goto(search_url, timeout=30000)
-                    page.wait_for_load_state("networkidle", timeout=20000)
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=40000)
+                    page.wait_for_timeout(5000)
+
+                    # Scroll progresivo
+                    for i in range(5):
+                        page.evaluate(f"window.scrollTo(0, {i * 400})")
+                        page.wait_for_timeout(400)
+
                 except TimeoutError:
                     pass
 
-                products = page.query_selector_all("div[class*='product'], article[class*='product']")
+                # Esperar galería VTEX
+                try:
+                    page.wait_for_selector(".vtex-search-result-3-x-gallery", timeout=10000)
+                except TimeoutError:
+                    pass
 
-                for product in products[:self.max_items]:
+                # Buscar productos con selector heurístico mejorado
+                all_divs = page.query_selector_all("div")
+                products = [
+                    div for div in all_divs
+                    if div.query_selector("a[href*='/p']") and div.query_selector("img")
+                ][:50]
+
+                print(f"Productos encontrados: {len(products)}")
+
+                for idx, product in enumerate(products[:self.max_items * 2]):  # Procesar más para compensar filtrado
                     try:
-                        a = product.query_selector("a[href]")
-                        img = product.query_selector("img")
-                        href = a.get_attribute("href") if a else None
-                        if href and not href.startswith("http"):
+                        full_text = ""
+                        try:
+                            full_text = product.inner_text()
+                        except Exception:
+                            pass
+
+                        # Filtrar elementos de navegación/UI
+                        if any(x in full_text.lower() for x in ["resultados de búsqueda", "filtrar por", "ordenar por"]):
+                            continue
+
+                        # URL - debe contener /p/ para ser producto
+                        a = product.query_selector("a[href*='/p']")
+                        if not a:
+                            continue
+
+                        href = a.get_attribute("href")
+                        if not href:
+                            continue
+
+                        if not href.startswith("http"):
                             href = urljoin(self.BASE, href)
-                        img_src = img.get_attribute("src") if img else None
 
-                        name_el = product.query_selector("h2, h3, [class*='name']")
-                        name = name_el.inner_text().strip() if name_el else ""
+                        # Evitar duplicados por URL
+                        if href in seen_urls:
+                            continue
+                        seen_urls.add(href)
 
-                        price_el = product.query_selector("[class*='price']")
-                        price = price_el.inner_text().strip() if price_el else ""
-                        if not price:
-                            text = product.inner_text()
-                            m = self.PRICE_RE.search(text)
-                            price = m.group(0).strip() if m else ""
+                        # Nombre
+                        name = ""
+                        name_selectors = [
+                            ".vtex-product-summary-2-x-nameContainer",
+                            "[class*='nameContainer']",
+                            "h3", "h2", "a[href*='/p']"
+                        ]
+                        for name_sel in name_selectors:
+                            name_el = product.query_selector(name_sel)
+                            if name_el:
+                                try:
+                                    name = name_el.inner_text().strip()
+                                    if len(name) > 5:
+                                        break
+                                except Exception:
+                                    continue
 
+                        if not name:
+                            continue
+
+                        # Validar relevancia
                         if not self.is_relevant(name, query):
                             continue
+
+                        # Imagen
+                        img = product.query_selector("img")
+                        img_src = ""
+                        if img:
+                            img_src = img.get_attribute("src") or img.get_attribute("data-src") or ""
+
+                        # Precio
+                        price = ""
+                        price_selectors = [
+                            ".vtex-product-price-1-x-sellingPrice",
+                            "[class*='sellingPrice']",
+                            "[class*='price']"
+                        ]
+                        for price_sel in price_selectors:
+                            price_el = product.query_selector(price_sel)
+                            if price_el:
+                                try:
+                                    price = price_el.inner_text().strip()
+                                    if "$" in price:
+                                        break
+                                except Exception:
+                                    continue
+
+                        if not price:
+                            m = self.PRICE_RE.search(full_text)
+                            price = m.group(0) if m else ""
 
                         prices_clean = self.extract_prices(price)
                         results.append({
@@ -56,23 +150,28 @@ class CuracaoScraper:
                             "name": self.clean_name(name),
                             "price_original": prices_clean["original"],
                             "price_discount": prices_clean["discount"],
-                            "url": href or "",
-                            "image": img_src or ""
+                            "url": href,
+                            "image": img_src
                         })
-                    except Exception as e:
-                        results.append({"store": "La Curacao", "error": str(e)})
+
+                        if len(results) >= self.max_items:
+                            break
+
+                    except Exception:
+                        continue
             finally:
                 try:
                     browser.close()
                 except Exception:
                     pass
 
+        print(f"Total resultados válidos: {len(results)}")
         return results
 
     def clean_name(self, raw: str) -> str:
         lines = raw.split("\n")
-        filtered = [line.strip() for line in lines if not re.search(r"Agregar al carrito|\$\d", line)]
-        return " ".join(filtered)
+        filtered = [l.strip() for l in lines if l.strip() and not re.search(r"Vendido por|Agregar|\$\d|Añadir", l)]
+        return " ".join(filtered)[:200]
 
     def extract_prices(self, raw: str) -> dict:
         matches = re.findall(r"\$\s?\d[\d,\.]*", raw)
@@ -84,4 +183,4 @@ class CuracaoScraper:
     def is_relevant(self, name: str, query: str) -> bool:
         query_words = query.lower().split()
         name_lower = name.lower()
-        return all(word in name_lower for word in query_words)
+        return any(word in name_lower for word in query_words)

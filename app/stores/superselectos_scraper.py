@@ -1,3 +1,4 @@
+# python
 from playwright.sync_api import sync_playwright, TimeoutError
 from urllib.parse import quote, urljoin
 import re
@@ -29,17 +30,14 @@ class SelectosScraper:
 
                 products = page.locator("li.item-producto")
                 count = products.count()
-                print("Productos encontrados:", count)
 
                 for i in range(min(count, self.max_items)):
                     product = products.nth(i)
-                    print(f"Procesando producto {i+1}/{count}")
                     try:
                         name = ""
                         name_locator = product.locator("h5.prod-nombre a")
                         if name_locator.count() > 0:
                             name = name_locator.first.inner_text().strip()
-                        print("Nombre extraído:", name)
 
                         a = product.locator("a[href]")
                         href = a.first.get_attribute("href") if a.count() > 0 else ""
@@ -57,7 +55,6 @@ class SelectosScraper:
                             price = m.group(0).strip() if m else ""
 
                         if not self.is_relevant(name, query):
-                            print("Producto descartado por irrelevancia")
                             continue
 
                         prices_clean = self.extract_prices(price)
@@ -69,9 +66,7 @@ class SelectosScraper:
                             "url": href or "",
                             "image": img_src or ""
                         })
-                        print("Producto agregado:", name)
                     except Exception as e:
-                        print("Error en producto:", str(e))
                         results.append({"store": "Super Selectos", "error": str(e)})
             finally:
                 try:
