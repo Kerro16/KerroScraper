@@ -40,3 +40,10 @@ def scrape_selectos(query: str = Query(...), username: str = Depends(verify_toke
     scraper = SelectosScraper()
     results = scraper.scrape(query)
     return {"user": username, "results": results}
+
+@app.get("/scrape/vidri")
+def scrape_vidri(query: str = Query(...), username: str = Depends(verify_token)):
+    from app.stores.vidri_scraper import VidriScraper
+    scraper = VidriScraper()
+    results = scraper.scrape(query)
+    return {"user": username, "results": results}
